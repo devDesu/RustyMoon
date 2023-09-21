@@ -6,7 +6,7 @@ Every "function" in lua is a so called "closure"- closure contains pointer to fu
 
 ## Entitites
 ### TValue
-Basic type in Lua - stored in stack, could either be immediate stack value or heap ptr (both with metadata)
+Basic type in Lua - stored in stack, could either be immediate "stack" value or heap ptr (both with metadata)
 
 ```c
 // C
@@ -33,7 +33,8 @@ typedef struct TValue {
 ```
 
 Collectable object in C is any heap-based data: strings, tables, closure*, ...
-NB!: to be C-compatible TValue size should be 9 bytes
+NB!: to be C-compatible TValue size should be 9 bytes. 
+NB2!: not really, we can construct C-like structures before C-call, but for the rest cases just use normal rust structures
 
 ```rust
 // Rust
@@ -45,6 +46,7 @@ pub enum TValue {
     NUMINT(i64),
     STR(Rc<String>),
     CLOSURE(Rc<Closure>),
+    TABLE(Rc<HashTable>)
 }
 ```
 
@@ -101,9 +103,6 @@ pub struct Proto {
     pub num_params: u8,  /* number of fixed (named) parameters */
     pub is_vararg: bool,
     pub max_stack_size: u8, /* number of registers needed by this function */
-    // sizeupvals omitted - handled by upvalues vec
-    // sizecode omitted - handled by code vec
-    // sizep omitted - handled by fns vec
     pub constants: Vec<TValue>,  /* constants used by the function */
     pub code: Vec<LuaInstruction>,  /* opcodes */
     pub fns: Vec<Proto>,  /* functions defined inside the function */
@@ -175,7 +174,11 @@ pub enum Closure {
 ```
 
 ### UpValue
-AKA closure variables, list of TValues for C closure and UpValue object for Lua closure. Lua closure UpValue could either be in-stack or heap-based
+AKA closure variables, list of TValues for C closure and UpValue object for Lua closure. 
+Lua closure UpValue could either be in-stack or heap-based
+
+If in-stack it references stack TValue, on upvalue_close call, 
+
 All upvalues are added to open_upvalues field of thread_state
 
 ```c
@@ -260,7 +263,31 @@ pub struct LuaThread {
     pub current_call: LinkedList<CallInfo>, // linked list of CallInfo frames, current call should be on top
     pub mode: ThreadMode,
     pub open_upvalues: LinkedList<UpVal>,
+    pub top: usize, // stack current top ptr
     // todo!: read about C calls, yields and error recovery
 }
 ```
 
+### Lua stack
+Stack was mentioned earlier multiple times because it's the main part of the Lua VM.
+Despite that Lua is register-based VM everything in Lua is done using stack.
+Stack is an array of `TValue`s, it's initialized per-thread
+
+| Item                                                	| Index                                                  	| Referenced by       	|
+|-----------------------------------------------------	|--------------------------------------------------------	|---------------------	|
+| ...                                                 	|                                                        	|                     	|
+| top of the function                                 	| 2 + var arg count + fixed args count + registers count 	| `call_info.top`     	|
+| function registers                                  	| 2+varArg count + fixed args count                      	|                     	|
+| `TValue` - first fixed fn arg                       	| 2+varArg count                                         	| `call_info.base`    	|
+| `TValue` - variable fn args                         	| ...                                                    	|                     	|
+| `TValue::Closure(Closure::LuaClosure(lua_closure))` 	| 2                                                      	| `call_info.closure` 	|
+| ...                                                 	| 1                                                      	|                     	|
+| stack base                                          	| 0                                                      	|                     	|
+
+## Execution flow
+1. Parse input file, init function protos
+2. Prepare thread instance - alloc stack, init root closure, push closure to the stack
+3. start execution
+ - 3.1 on `call` opcode init new closure, push it to the stack, initialize new call_info, prepare call frame (varargs, etc), add call_info to thread call_info list, finish step
+ - 3.2 on `return` opcode clear call_frame, place return values (if any) on the stack starting from closure ptr 
+ - 3.3 `vararg` stuff modifies stack! 
