@@ -291,3 +291,6 @@ Stack is an array of `TValue`s, it's initialized per-thread
  - 3.1 on `call` opcode init new closure, push it to the stack, initialize new call_info, prepare call frame (varargs, etc), add call_info to thread call_info list, finish step
  - 3.2 on `return` opcode clear call_frame, place return values (if any) on the stack starting from closure ptr 
  - 3.3 `vararg` stuff modifies stack! 
+
+ ## Entities relationsships
+[![Test](./relationships.drawio.svg)](https://app.diagrams.net/?mode=github#HdevDesu%2FRustyMoon%2Fmaster%2Frelationships.drawio.svg)
