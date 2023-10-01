@@ -175,9 +175,9 @@ pub enum Closure {
 
 ### UpValue
 AKA closure variables, list of TValues for C closure and UpValue object for Lua closure. 
-Lua closure UpValue could either be in-stack or heap-based
+UpValue could be either `Open` or `Closed`
 
-If in-stack it references stack TValue, on upvalue_close call, 
+If open it references stack TValue (stack offset), on upvalue_close call, value from stack offset is copied into UpValue value field ( `UpValue::Closed(stack.get_mut_at_offset(open_upvalue.0))` ), UpVal becomes `closed` and it references TValue in direct way (*TValue)
 
 All upvalues are added to open_upvalues field of thread_state
 
@@ -207,9 +207,11 @@ typedef struct UpVal {
 
 ```rust
 // Rust
+type StackOffset = u16;
 
 pub struct UpVal {
-    ???,
+    Closed(&'static mut TValue),
+    Open(StackOffset)
 }
 ```
 
@@ -290,7 +292,7 @@ Stack is an array of `TValue`s, it's initialized per-thread
 3. start execution
  - 3.1 on `call` opcode init new closure, push it to the stack, initialize new call_info, prepare call frame (varargs, etc), add call_info to thread call_info list, finish step
  - 3.2 on `return` opcode clear call_frame, place return values (if any) on the stack starting from closure ptr 
- - 3.3 `vararg` stuff modifies stack! 
+ - 3.3 `vararg` stuff modifies stack! Variable arguments are placed after closure ptr, fixed args are placed after, local variables/fn registers are placed after fixed args and stack top is being updated
 
  ## Entities relationsships
 [![Test](./relationships.drawio.svg)](https://app.diagrams.net/?mode=github#HdevDesu%2FRustyMoon%2Fmaster%2Frelationships.drawio.svg)
