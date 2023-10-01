@@ -1,8 +1,9 @@
 use std::{io::{Read, BufReader}, rc::Rc};
+use std::fmt::Write;
 
-use crate::core::{opcodes, types::TValue};
+use crate::core::types::TValue;
 
-use super::opcodes::Opcode;
+use super::{opcodes::{LuaInstruction, LuaOpcode, self}, types::{UpvalueDescription, Proto}};
 
 struct LuaReader<R: Read> {
     reader: R,
@@ -40,7 +41,7 @@ impl<R: Read> LuaReader<R> {
     pub fn read_instruction(&mut self) -> u32 {
         let mut bytes: [u8; 4] = [0, 0, 0, 0];
         self.reader.read(&mut bytes);
-        u32::from_le_bytes(bytes) as u32
+        u32::from_le_bytes(bytes)
     }
 
     pub fn read_number(&mut self) -> f64 {
@@ -90,42 +91,41 @@ impl<R: Read> LuaReader<R> {
             //let raw_s_ptr = unsafe { s.as_bytes_mut() };
             let mut empty_buf = vec![0u8; str_size - 1];
             let got_bytes = self.reader.read(&mut empty_buf).expect("Failed to read exact");
-            assert_eq!(got_bytes, (str_size-1) as usize);
+            assert_eq!(got_bytes, { str_size-1 });
             Some(Rc::new(String::from_utf8(empty_buf).expect("Failed to convert bytes to str")))
         }
     }
 
-    pub fn read_code(&mut self) -> Vec<Opcode> {
-        println!("Reading code");
+    pub fn read_code(&mut self) -> Vec<LuaInstruction> {
         let opcodes_count = self.read_int();
-        println!("Opcodes: {opcodes_count}");
-
-        let mut result: Vec<Opcode> = Vec::new();
+        
+        let mut result: Vec<LuaInstruction> = Vec::new();
         for _ in 0..opcodes_count {
-            let opcode = opcodes::decode(self.read_instruction()).expect("Failed to parse opcode");
-            println!("{opcode:?}");
+            let opcode = opcodes::decode(self.read_instruction());
             result.push(opcode);
         }
 
         result
     }
 
-    pub fn read_protos(&mut self) {
-        println!("Reading protos");
+    pub fn read_protos(&mut self) -> Vec<Proto> {
         let proto_count = self.read_int();
-        println!("Proto count {proto_count}");
+        let mut result: Vec<Proto> = Vec::new();
+        for _ in 0..proto_count {
+            result.push(self.read_function());
+        }
+
+        result
     }
 
-    pub fn read_upvalues(&mut self) -> Vec<Upvalue> {
+    pub fn read_upvalues(&mut self) -> Vec<UpvalueDescription> {
         let upval_count = self.read_int();
-        println!("Upvals {upval_count}");
-
-        let mut upvals: Vec<Upvalue> = Vec::new();
+        let mut upvals: Vec<UpvalueDescription> = Vec::new();
         for _ in 0..upval_count {
-            let instack = if self.load_byte() == 0 { false } else { true };
+            let instack = self.load_byte() != 0;
             let idx = self.load_byte();
             let kind = self.load_byte();
-            upvals.push( Upvalue {
+            upvals.push( UpvalueDescription {
                 name: None,
                 instack,
                 idx,
@@ -138,7 +138,6 @@ impl<R: Read> LuaReader<R> {
 
     pub fn read_constants(&mut self) -> Vec<TValue> {
         let const_count = self.read_int();
-        println!("Constants {const_count}");
 
         /*
         * #define LUA_TNIL                0
@@ -171,6 +170,35 @@ impl<R: Read> LuaReader<R> {
 
         result
     }
+
+    fn read_function(&mut self) -> Proto {
+        let fn_name = self.read_string();
+        let line_defined = self.read_int() as usize;
+        let last_line_defined = self.read_int() as usize;
+        let num_params = self.load_byte();
+        let is_vararg = self.load_byte() == 1;
+        let max_stack_size = self.load_byte();
+    
+        let opcodes = self.read_code();
+        let constants = self.read_constants();
+        let upvals = self.read_upvalues();
+        let protos = self.read_protos();
+    
+    
+        
+    
+        Proto {
+            fn_name,
+            is_vararg,
+            max_stack_size,
+            num_params,
+            upvalues: upvals,
+            code: opcodes,
+            constants,
+            fns: protos,
+        }
+    }
+    
 }
 
 #[derive(Debug)]
@@ -204,9 +232,6 @@ pub fn parse_header(data: &[u8]) -> Result<(usize, Header), std::io::Error> {
     assert_eq!(header.signature, *b"\x1bLua");
     assert_eq!(header.data_chunk, *b"\x19\x93\r\n\x1a\n");
     
-
-    println!("{:?}", header);
-    
     let test_int_value = l_reader.read_integer();
     assert_eq!(test_int_value, 0x5678);
 
@@ -219,62 +244,46 @@ pub fn parse_header(data: &[u8]) -> Result<(usize, Header), std::io::Error> {
 
     }
 
-pub fn parse_all(data: &[u8]) {
+pub fn parse_all(data: &[u8]) -> Proto {
     let (offset, header) = parse_header(data).unwrap();
     let mut lua_reader = LuaReader::new(BufReader::new(&data[offset..]), header.int_size, header.number_size);
-    let upvalues = lua_reader.load_byte();
-    let func = read_function(&mut lua_reader);
+    let _upvalues = lua_reader.load_byte();
+    let func = lua_reader.read_function();
     println!("{:?}", func);
+    func
 }
 
-#[derive(Debug)]
-struct FnInfo {
-    fn_name: Option<Rc<String>>,
-    line_defined: i64,
-    last_line_defined: i64,
-    num_params: u8,
-    is_vararg: bool,
-    max_stack_size: u8,
-    upvalues: Vec<Upvalue>,
-    opcodes: Vec<Opcode>,
-    constants: Vec<TValue>,
+
+impl Proto {
+    pub fn display_opcode(&self, opcode: &LuaInstruction) -> String {
+        let mut result = String::new();
+        write!(&mut result, "{:?}; ", opcode.opcode).expect("Failed to write");
+        let err = match opcode.opcode {
+            LuaOpcode::LOADI_AsBx => write!(&mut result, "R[{}] = {}", opcode.args.get_A(), opcode.args.get_sBx()),
+            LuaOpcode::LOADK_ABx => write!(&mut result, "R[{}] = Const[{}] ({})", opcode.args.get_A(), opcode.args.get_Bx(), self.constants.get(opcode.args.get_sBx() as usize).unwrap()),
+        //Opcode::OP_ADD(abc) => write!(&mut result, "R[{}] = R[{}] + R[{}]", abc.0, abc.2, abc.3),
+        //Opcode::OP_LOADK(abx) => write!(&mut result, "R[{}] = Const[{}] ({})", abx.0, abx.1, constants.get(abx.1 as usize).unwrap()),
+        //Opcode::OP_SETTABUP(abc) => write!(&mut result, "UpValue({})[{}] = {}", upvalues.get(abc.0 as usize).unwrap(), constants.get(abc.2 as usize).unwrap(), constants.get(abc.3 as usize).unwrap()),
+           _ => write!(&mut result, "TODO"),
+        };
+        err.expect("Failed to write");
+        result
+    }
 }
 
-fn read_function<R: Read>(reader: &mut LuaReader<R>) -> FnInfo {
-    let fn_name = reader.read_string();
-    let line_defined = reader.read_int();
-    let last_line_defined = reader.read_int();
-    let num_params = reader.load_byte();
-    let is_vararg = reader.load_byte() == 1;
-    let max_stack_size = reader.load_byte();
-
-    println!("Fn name: {fn_name:?}");
-
-    let opcodes = reader.read_code();
-    let constants = reader.read_constants();
-    let upvals = reader.read_upvalues();
-    reader.read_protos();
-
-
-    let fn_info = FnInfo {
-        fn_name,
-        line_defined,
-        last_line_defined,
-        is_vararg,
-        max_stack_size,
-        num_params,
-        upvalues: upvals,
-        opcodes,
-        constants,
-    };
-
-    fn_info
-}
-
-#[derive(Debug)]
-struct Upvalue {
-    instack: bool,
-    idx: u8,
-    kind: u8,
-    name: Option<Rc<String>>
+impl std::fmt::Display for Proto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f, 
+            "Fn: {:#?}, {} params, vararg: {}, max stack: {}\nUpvalues: {}\nConstants: {}\nPrototypes: {}\nCode: {}", 
+            self.fn_name,
+            self.num_params, 
+            self.is_vararg, 
+            self.max_stack_size,
+            self.upvalues.iter().map(|x| { x.to_string() }).collect::<Vec<String>>().join("\n"),
+            self.constants.iter().map(|x| { x.to_string() }).collect::<Vec<String>>().join("\n"),
+            self.fns.iter().map(|x| { x.to_string() }).collect::<Vec<String>>().join("\n"),
+            self.code.iter().map( |x| { self.display_opcode(x) } ).collect::<Vec<String>>().join("\n")
+        )
+    }
 }
